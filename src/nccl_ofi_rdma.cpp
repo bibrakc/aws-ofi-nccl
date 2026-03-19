@@ -4772,6 +4772,7 @@ int nccl_net_ofi_rdma_ep_t::listen(nccl_net_ofi_conn_handle_t *handle,
 	l_comm->dev_id = dev_id;
 
 	/* Create CM listener */
+	this->init_cm();
 	l_comm->listener = this->cm->listen();
 
 	*handle = l_comm->listener->get_handle();
@@ -6086,6 +6087,7 @@ int nccl_net_ofi_rdma_ep_t::connect(nccl_net_ofi_conn_handle_t *handle,
 		this->prepare_send_connect_message(s_comm->local_comm_id, s_comm->ctrl_mailbox, s_comm->ctrl_mr_handle, &conn_msg);
 
 		/* Create connector */
+		this->init_cm();
 		s_comm->connector = this->cm->connect(*handle, &conn_msg, sizeof(conn_msg));
 	}
 
@@ -6302,6 +6304,18 @@ int nccl_net_ofi_rdma_ep_t::init_rail_ofi_resources(nccl_net_ofi_rdma_device_t *
 }
 
 
+void nccl_net_ofi_rdma_ep_t::init_cm()
+{
+	if (!this->cm) {
+		nccl_net_ofi_rdma_domain_t *rdma_domain =
+			static_cast<nccl_net_ofi_rdma_domain_t *>(this->domain);
+		this->cm = new nccl_ofi_connection_manager(
+			*rdma_domain, *this,
+			sizeof(nccl_ofi_rdma_connection_info_t));
+	}
+}
+
+
 int nccl_net_ofi_rdma_ep_t::cleanup_resources() {
 	int ret = 0;
 	int err_code = 0;
@@ -6458,10 +6472,6 @@ nccl_net_ofi_rdma_ep_t::nccl_net_ofi_rdma_ep_t(nccl_net_ofi_rdma_domain_t *domai
 		NCCL_OFI_WARN("Preparation of rx buffers failed");
 		throw std::runtime_error("rdma endpoint constructor: initializing rx_buffers failed");
 	}
-
-	/* Connection manager for this endpoint */
-	this->cm = new nccl_ofi_connection_manager
-		(*domain_arg, *this, sizeof(nccl_ofi_rdma_connection_info_t));
 
 	/* Create scheduler */
 	this->scheduler = new nccl_net_ofi_threshold_scheduler(this->num_rails);

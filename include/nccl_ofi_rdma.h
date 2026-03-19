@@ -1268,7 +1268,10 @@ public:
 	ssize_t eager_send_size;
 
 	/**
-	 * Associated connection manager
+	 * Associated connection manager. Created lazily on first
+	 * listen() or connect() call via init_cm() to avoid creating
+	 * an OFI endpoint during the plugin init probe, which would
+	 * waste a hardware endpoint on every process.
 	 *
 	 * TODO: make cm a direct member once nccl_ofi_connection_manager can
 	 * safely be initialized in the endpoint constructor. Currently cm can't
@@ -1277,8 +1280,17 @@ public:
 	 * initialized Libfabric and ID pool resources. As well, cm can't be
 	 * initialized at the end of the endpoint constructor since
 	 * nccl_ofi_connection_manager doesn't have a default constructor.
+	 * Additionally, eager construction would create a CM OFI endpoint
+	 * even for the init probe path (get_ep / release_ep in
+	 * nccl_net_ofi_create_plugin), which is unnecessary and at scale
+	 * exhausts the per-NIC endpoint limit.
 	 */
 	nccl_ofi_connection_manager *cm = nullptr;
+
+	/**
+	 * @brief	Initialize the connection manager if not already created.
+	 */
+	void init_cm();
 
 	/* Message scheduler */
 	nccl_net_ofi_scheduler *scheduler = nullptr;
