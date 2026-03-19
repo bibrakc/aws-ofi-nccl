@@ -1651,6 +1651,7 @@ int nccl_net_ofi_sendrecv_ep_t::listen(nccl_net_ofi_conn_handle_t *handle,
 	l_comm->local_ep = this->ofi_ep.get();
 	l_comm->local_ep_addr = local_ep_addr;
 
+	this->init_cm();
 	l_comm->listener = this->cm->listen();
 
 	/* Build handle */
@@ -1972,6 +1973,7 @@ int nccl_net_ofi_sendrecv_ep_t::connect(nccl_net_ofi_conn_handle_t *handle,
 			return ret;
 		}
 
+		this->init_cm();
 		s_comm->connector = this->cm->connect(*handle, &conn_info, sizeof(conn_info));
 	}
 
@@ -2016,6 +2018,18 @@ int nccl_net_ofi_sendrecv_ep_t::connect(nccl_net_ofi_conn_handle_t *handle,
 	*send_comm = s_comm;
 
 	return ret;
+}
+
+
+void nccl_net_ofi_sendrecv_ep_t::init_cm()
+{
+	if (!this->cm) {
+		nccl_net_ofi_sendrecv_domain_t *sendrecv_domain =
+			static_cast<nccl_net_ofi_sendrecv_domain_t *>(this->domain);
+		this->cm = new nccl_ofi_connection_manager(
+			*sendrecv_domain, *this,
+			sizeof(nccl_ofi_connection_info_t));
+	}
 }
 
 
@@ -2095,9 +2109,6 @@ nccl_net_ofi_sendrecv_ep_t::nccl_net_ofi_sendrecv_ep_t(nccl_net_ofi_sendrecv_dom
 		throw std::runtime_error("sendrecv endpoint constructor: failed to init endpoint");
 	}
 	this->ofi_ep = std::move(ep_result.resource);
-
-	this->cm = new nccl_ofi_connection_manager(*domain_arg, *this,
-						   sizeof(nccl_ofi_connection_info_t));
 }
 
 
