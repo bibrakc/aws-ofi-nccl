@@ -36,6 +36,7 @@
 #include "nccl_ofi_pthread.h"
 #include "nccl_ofi_dmabuf.h"
 #include "nccl_ofi_mr.h"
+#include "nccl_ofi_init_profiling.h"
 
 /* Message buffer size -- maximum span of simultaneous inflight messages */
 #define NCCL_OFI_RDMA_MSGBUFF_SIZE 256
@@ -7532,8 +7533,10 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 	} else {
 		api_version = nccl_ofi_dmabuf_viable() ? FI_VERSION(1, 20) : FI_VERSION(1, 18);
 	}
+	INIT_PROFILE_BEGIN(fi_getinfo);
 	ret = nccl_ofi_ofiutils_get_providers(provider_filter, api_version, hints,
 					      &provider_list, &num_providers);
+	INIT_PROFILE_END(fi_getinfo);
 	if (ret == 0) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Using Libfabric %u.%u API, with %s support",
 			       FI_MAJOR(api_version),
@@ -7623,7 +7626,9 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 		return -ENOTSUP;
 	}
 
+	INIT_PROFILE_BEGIN(rdma_plugin_ctor);
 	plugin = new nccl_net_ofi_rdma_plugin_t(provider_list, topo);
+	INIT_PROFILE_END(rdma_plugin_ctor);
 
 	/**
 	 * NCCL's topology detection will set NIC PCIe link speed based on the

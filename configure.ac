@@ -224,6 +224,17 @@ AS_IF([test "${enable_trace}" = "yes" ],
        AC_MSG_RESULT(no)])
 AC_DEFINE_UNQUOTED([OFI_NCCL_TRACE], [${trace}], [Defined to 1 unit test output should include TRACE level])
 
+# Enable init() profiling timestamps
+AC_ARG_ENABLE([init-profiling],
+   [AS_HELP_STRING([--enable-init-profiling], [Enable init() phase timing instrumentation])])
+AC_MSG_CHECKING([whether to enable init profiling])
+AS_IF([test "${enable_init_profiling}" = "yes" ],
+      [init_profiling=1
+       AC_MSG_RESULT(yes)],
+      [init_profiling=0
+       AC_MSG_RESULT(no)])
+AC_DEFINE_UNQUOTED([HAVE_INIT_PROFILING], [${init_profiling}], [Defined to 1 if init profiling is enabled])
+
 picky_cxxflags=""
 AC_DEFUN([ADD_PICKY_FLAGS],[
     AC_LANG_PUSH([C++])

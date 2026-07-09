@@ -40,6 +40,7 @@
 #include "nccl_ofi_platform.h"
 #include "nccl_ofi_ofiutils.h"
 #include "nccl_ofi_system.h"
+#include "nccl_ofi_init_profiling.h"
 
 
 extern char **environ;
@@ -210,31 +211,37 @@ int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t **plugin_p)
 	mr_cache_alignment = std::min(system_page_size, NCCL_OFI_CACHE_PAGE_SIZE);
 
 #if HAVE_GPU
+	INIT_PROFILE_BEGIN(gpu_init);
 	ret = nccl_net_ofi_gpu_init();
 	if (ret != 0) {
 		NCCL_OFI_WARN("CUDA initialization failed.");
 		goto exit;
 	}
+	INIT_PROFILE_END(gpu_init);
 #endif
 
 	/* configuration parameters */
 	cq_read_count = ofi_nccl_cq_read_count();
 
+	INIT_PROFILE_BEGIN(topo_create);
 	topo.reset(nccl_ofi_topo_create());
 	if (!topo) {
 		NCCL_OFI_WARN("Failed to create NCCL OFI topology");
 		ret = -ENODEV;
 		goto exit;
 	}
+	INIT_PROFILE_END(topo_create);
 
 	PlatformManager::register_all_platforms(topo.get());
 
 	NCCL_OFI_INFO(NCCL_INIT | NCCL_NET, "Plugin selected platform: %s",
 	       PlatformManager::get_global().get_platform().get_name());
 
+	INIT_PROFILE_BEGIN(platform_init);
 	ret = PlatformManager::get_global().get_platform().init(&provider_filter);
 	if (ret != 0)
 		goto exit;
+	INIT_PROFILE_END(platform_init);
 
 	if (ofi_nccl_progress_model.get_source() != ParamSource::DEFAULT) {
 		NCCL_OFI_INFO(NCCL_INIT | NCCL_NET, "Requesting progress model %s",
@@ -264,6 +271,7 @@ int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t **plugin_p)
 	if (ofi_nccl_protocol.get_source() != ParamSource::DEFAULT) {
 		bool dummy;
 
+		INIT_PROFILE_BEGIN(protocol_init);
 		switch (ofi_nccl_protocol.get()) {
 		case PROTOCOL::SENDRECV:
 			ret = nccl_net_ofi_sendrecv_init(provider_filter, &plugin, topo.get());
@@ -280,6 +288,7 @@ int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t **plugin_p)
 			}
 			break;
 		}
+		INIT_PROFILE_END(protocol_init);
 	} else {
 		bool have_multiple_rails = false;
 		nccl_net_ofi_plugin_t *rdma_plugin = NULL, *sendrecv_plugin = NULL;
@@ -340,11 +349,13 @@ int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t **plugin_p)
 			      ofi_nccl_protocol.get_string());
 	}
 
+	INIT_PROFILE_BEGIN(complete_init);
 	ret = plugin->complete_init();
 	if (ret != 0) {
 		NCCL_OFI_WARN("Failed to initialize %s protocol", ofi_nccl_protocol.get_string());
 		goto exit;
 	}
+	INIT_PROFILE_END(complete_init);
 
 	/* In order to set endpoint options and potentially NCCL configuration
 	 * options (such as NCCL_PROTO) during the plugin initialization
@@ -363,11 +374,14 @@ int nccl_net_ofi_create_plugin(nccl_net_ofi_plugin_t **plugin_p)
 	 */
 	device = plugin->get_device(getpid() % plugin->get_num_devices());
 
+	INIT_PROFILE_BEGIN(get_ep);
 	/* get the endpoint from the default domain, domain_key = 0 */
 	ep = device->get_ep(0, nccl_net_ofi_gettid());
 	if (ep == nullptr) {
 		goto exit;
 	}
+	INIT_PROFILE_END(get_ep);
+
 	ret = device->get_properties(&properties);
 	if (ret != 0) {
 		goto exit;
@@ -764,12 +778,17 @@ std::shared_ptr<nccl_net_ofi_ep_t> nccl_net_ofi_device_t::get_ep(unsigned int do
 	 * By the time we call domain->get_ep() (which takes
 	 * domain_lock), device_lock is already released. The
 	 * shared_ptr keeps the domain alive without the lock. */
+	INIT_PROFILE_BEGIN(get_domain);
 	auto domain = this->get_domain(domain_key);
+	INIT_PROFILE_END(get_domain);
 	if (domain == nullptr) {
 		return nullptr;
 	}
 
-	return domain->get_ep(endpoint_key);
+	INIT_PROFILE_BEGIN(get_endpoint);
+	auto ep = domain->get_ep(endpoint_key);
+	INIT_PROFILE_END(get_endpoint);
+	return ep;
 }
 
 

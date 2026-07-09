@@ -10,6 +10,7 @@
 #include "nccl_ofi.h"
 #include "nccl_ofi_api.h"
 #include "nccl_ofi_param.h"
+#include "nccl_ofi_init_profiling.h"
 
 
 static_assert(sizeof(nccl_net_ofi_conn_handle_t) <= NCCL_NET_HANDLE_MAXSIZE,
@@ -174,13 +175,17 @@ ncclResult_t nccl_net_ofi_listen(int dev_id, void *handle, void **lComm,
 		}
 
 		/* Retrieve and validate endpoint */
+		INIT_PROFILE_BEGIN(listen_get_ep);
 		ep = device->get_ep(domain_key, nccl_net_ofi_gettid());
+		INIT_PROFILE_END(listen_get_ep);
 		if (OFI_UNLIKELY(ep == nullptr)) {
 			NCCL_OFI_WARN("Error accessing endpoint. Endpoint has not been initialized.");
 			return check_return(ncclInternalError);
 		}
 
+		INIT_PROFILE_BEGIN(listen_ep_listen);
 		ret = ep->listen(static_cast<nccl_net_ofi_conn_handle_t *>(handle), listen_comm);
+		INIT_PROFILE_END(listen_ep_listen);
 	}
 	catch (const std::exception &e) {
 		NCCL_OFI_WARN("Caught exception in plugin listen: %s", e.what());
