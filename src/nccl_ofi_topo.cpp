@@ -12,6 +12,11 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <cinttypes>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <time.h>
 
 #include "nccl_ofi.h"
 #include "nccl_ofi_log.h"
@@ -19,6 +24,7 @@
 #include "nccl_ofi_math.h"
 #include "nccl_ofi_ofiutils.h"
 #include "nccl_ofi_platform.h"
+#include "nccl_ofi_param.h"
 
 #if HAVE_CUDA
 static const uint8_t target_class_ids[] = { 0x03 };           /* Display controller class */
@@ -714,6 +720,210 @@ static int set_user_data(nccl_ofi_topo_t *ofi_topo,
 	return 0;
 }
 
+/*
+ * Per-node hwloc topology XML cache (Part 1 Option 2b).
+ *
+ * hwloc_topology_load() scans /sys/devices, which is slow (~78ms) and, when
+ * many ranks on a node run it at once, heavily contended (~330ms at 8ppn).
+ * Node hardware topology is identical across co-located ranks and static for
+ * the life of a node, so we let one rank ("leader") scan and export the
+ * topology to a node-local XML file in /dev/shm; other ranks (and all ranks
+ * in later jobs on the same node) import that XML (~5ms) instead.
+ *
+ * Coordination uses flock() on a node-local lock file:
+ *   - auto-released on process death (a crashed leader cannot deadlock),
+ *   - no stale locks to clean up.
+ * Any failure falls back to a normal sysfs scan; init never hangs or fails
+ * because of the cache.
+ */
+
+/* Bump when the cached XML's meaning could change across plugin versions. */
+#define NCCL_OFI_TOPO_CACHE_VERSION 1
+/* Bound on how long a follower waits for the leader before self-scanning. */
+#define NCCL_OFI_TOPO_CACHE_WAIT_MS 10000
+
+static void topo_cache_paths(char *xml_path, size_t xml_len,
+			     char *lock_path, size_t lock_len)
+{
+	unsigned uid = (unsigned)getuid();
+	snprintf(xml_path, xml_len, "/dev/shm/nccl-ofi-topo-uid%u-v%d.xml",
+		 uid, NCCL_OFI_TOPO_CACHE_VERSION);
+	snprintf(lock_path, lock_len, "/dev/shm/nccl-ofi-topo-uid%u-v%d.lock",
+		 uid, NCCL_OFI_TOPO_CACHE_VERSION);
+}
+
+/*
+ * Import a topology from an XML file. Returns 0 and sets *out on success.
+ * On any failure returns -1 and leaves *out untouched (nothing to free).
+ */
+static int topo_import_xml(hwloc_topology_t *out, const char *path)
+{
+	hwloc_topology_t topo;
+
+	if (access(path, R_OK) != 0) {
+		return -1;
+	}
+	if (hwloc_topology_init(&topo) != 0) {
+		return -1;
+	}
+	enable_hwloc_io_types(topo);
+	if (hwloc_topology_set_xml(topo, path) != 0) {
+		hwloc_topology_destroy(topo);
+		return -1;
+	}
+	if (hwloc_topology_load(topo) != 0) {
+		hwloc_topology_destroy(topo);
+		return -1;
+	}
+
+	*out = topo;
+	return 0;
+}
+
+/*
+ * Best-effort export of a loaded topology to the cache path. Writes to a
+ * per-pid temp file then atomically renames, so readers only ever see a
+ * complete file. Failures are non-fatal (cache simply stays unpopulated).
+ */
+static void topo_export_xml(hwloc_topology_t topo, const char *path)
+{
+	char tmp_path[300];
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", path, (int)getpid());
+
+	if (hwloc_topology_export_xml(topo, tmp_path, 0) != 0) {
+		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
+			       "Topology XML export to %s failed; cache not populated",
+			       tmp_path);
+		return;
+	}
+	if (rename(tmp_path, path) != 0) {
+		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
+			       "Topology cache rename %s -> %s failed: %s",
+			       tmp_path, path, strerror(errno));
+		unlink(tmp_path);
+	}
+}
+
+/*
+ * Scan the hardware topology via sysfs. Returns 0 and sets *out on success.
+ * If export_path is non-NULL, best-effort exports the result to the cache.
+ */
+static int topo_scan_sysfs(hwloc_topology_t *out, const char *export_path)
+{
+	hwloc_topology_t topo;
+
+	if (hwloc_topology_init(&topo) != 0) {
+		NCCL_OFI_WARN("Unable to initialize hardware topology.");
+		return -1;
+	}
+	enable_hwloc_io_types(topo);
+	if (hwloc_topology_load(topo) != 0) {
+		NCCL_OFI_WARN("Unable to load hardware topology.");
+		hwloc_topology_destroy(topo);
+		return -1;
+	}
+
+	if (export_path != NULL) {
+		topo_export_xml(topo, export_path);
+	}
+
+	*out = topo;
+	return 0;
+}
+
+/*
+ * Wait (bounded) for the leader to release its exclusive lock, by polling for
+ * a shared lock. Returns 0 if the leader finished, -1 on timeout.
+ */
+static int topo_wait_for_leader(int lockfd, int timeout_ms)
+{
+	const int poll_us = 1000; /* 1 ms */
+	int waited_us = 0;
+
+	while (waited_us < timeout_ms * 1000) {
+		if (flock(lockfd, LOCK_SH | LOCK_NB) == 0) {
+			flock(lockfd, LOCK_UN);
+			return 0;
+		}
+		if (errno != EWOULDBLOCK) {
+			return -1;
+		}
+		usleep(poll_us);
+		waited_us += poll_us;
+	}
+	return -1;
+}
+
+/*
+ * Load the hwloc topology, using the per-node XML cache when enabled.
+ * Returns 0 and sets *out on success, -1 on failure.
+ */
+static int load_hwloc_topology(hwloc_topology_t *out)
+{
+	char xml_path[256];
+	char lock_path[256];
+	int lockfd;
+
+	if (!ofi_nccl_topo_cache.get()) {
+		return topo_scan_sysfs(out, NULL);
+	}
+
+	topo_cache_paths(xml_path, sizeof(xml_path), lock_path, sizeof(lock_path));
+
+	/* 1. Fast path: cache already present (common for followers and for
+	 * every rank in later jobs on the same node). */
+	if (topo_import_xml(out, xml_path) == 0) {
+		NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
+			      "Imported hwloc topology from cache %s", xml_path);
+		return 0;
+	}
+
+	/* 2. Open the coordination lock. If we cannot, just scan. */
+	lockfd = open(lock_path, O_CREAT | O_RDWR, 0600);
+	if (lockfd < 0) {
+		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
+			       "Could not open topo cache lock %s: %s; scanning",
+			       lock_path, strerror(errno));
+		return topo_scan_sysfs(out, NULL);
+	}
+
+	if (flock(lockfd, LOCK_EX | LOCK_NB) == 0) {
+		/* LEADER. Re-check in case another process just published. */
+		int ret;
+		if (topo_import_xml(out, xml_path) == 0) {
+			flock(lockfd, LOCK_UN);
+			close(lockfd);
+			NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
+				      "Imported hwloc topology from cache %s", xml_path);
+			return 0;
+		}
+		NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
+			      "Topology cache miss; scanning sysfs and populating %s",
+			      xml_path);
+		ret = topo_scan_sysfs(out, xml_path);
+		flock(lockfd, LOCK_UN);
+		close(lockfd);
+		return ret;
+	}
+
+	/* FOLLOWER. Wait for the leader, then import; fall back to scan. */
+	if (topo_wait_for_leader(lockfd, NCCL_OFI_TOPO_CACHE_WAIT_MS) == 0) {
+		close(lockfd);
+		if (topo_import_xml(out, xml_path) == 0) {
+			NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
+				      "Imported hwloc topology from cache %s", xml_path);
+			return 0;
+		}
+		NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
+			      "Topology cache unavailable after wait; scanning sysfs");
+		return topo_scan_sysfs(out, NULL);
+	}
+
+	close(lockfd);
+	NCCL_OFI_WARN("Timed out waiting for topology cache leader; scanning sysfs");
+	return topo_scan_sysfs(out, NULL);
+}
+
 nccl_ofi_topo_t *nccl_ofi_topo_create()
 {
 	/* Allocate NCCL OFI topology */
@@ -725,17 +935,10 @@ nccl_ofi_topo_t *nccl_ofi_topo_create()
 	}
 
 	/*
-	 * Load hardware topology
+	 * Load hardware topology, using the per-node XML cache when enabled
+	 * (falls back to a sysfs scan on any failure).
 	 */
-	if (hwloc_topology_init(&ofi_topo->topo) != 0) {
-		NCCL_OFI_WARN("Unable to initialize hardware topology.");
-		goto error;
-	}
-
-	/* Prepare hardware topology ready to load IO nodes as well */
-	enable_hwloc_io_types(ofi_topo->topo);
-	if (hwloc_topology_load(ofi_topo->topo) != 0) {
-		NCCL_OFI_WARN("Unable to load hardware topology.");
+	if (load_hwloc_topology(&ofi_topo->topo) != 0) {
 		goto error;
 	}
 

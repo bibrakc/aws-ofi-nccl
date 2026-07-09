@@ -338,6 +338,16 @@ OFI_NCCL_PARAM(bool, skip_nics_without_accel,
 				"SKIP_NICS_WITHOUT_ACCEL_AT_SAME_PCI_LEVEL", false);
 
 /*
+ * Enable the per-node hwloc topology XML cache. When enabled, one rank per
+ * node scans the hardware topology and exports it to a node-local XML file in
+ * /dev/shm; other co-located ranks (and all ranks in later jobs on the same
+ * node) import that XML instead of re-scanning sysfs. Falls back to a normal
+ * sysfs scan on any failure. Disable with OFI_NCCL_TOPO_CACHE=0.
+ */
+OFI_NCCL_PARAM(bool, topo_cache,
+				"TOPO_CACHE", true);
+
+/*
  * Number of RX buffers to post for the connection manager endpoint (for
  * connection establishment)
  *
