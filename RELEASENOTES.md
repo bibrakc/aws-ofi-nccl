@@ -1,3 +1,13 @@
+# v99.26.0 (2026-08-18)
+
+This is the synthetic final release for validating the alpha-to-final transition on
+the bibrakc fork. It is not intended for production use.
+
+* Validate final-version artifact names without the compact alpha suffix.
+* Validate that final packaging cannot be confused with `v99.26.0a1` or `v99.26.0a2`.
+* Validate that the final GitHub release remains a draft but is not marked prerelease.
+* Repeat the complete build and package checks for the exact final artifact set.
+
 # v99.26.0a2 (2026-08-18)
 
 This is the second synthetic alpha release for validating candidate iteration on
