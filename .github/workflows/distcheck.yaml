@@ -285,6 +285,26 @@ jobs:
           path: config.log
           if-no-files-found: ignore
 
+  release-scripts:
+    runs-on: ubuntu-latest
+    name: Release script tests
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Fix Git Configuration
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Run release script tests
+        run: |
+          chmod +x contrib/scripts/release_version
+          chmod +x contrib/scripts/generate_release_tag
+          chmod +x contrib/scripts/generate_debian_changelog.sh
+          chmod +x m4/get_version.sh
+          bash tests/release/test_release_scripts.sh
+
   codechecker:
     runs-on: ubuntu-22.04
     needs: [distcheck]

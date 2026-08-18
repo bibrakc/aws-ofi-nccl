@@ -15,7 +15,12 @@ EXTRA_DIST = \
 	NOTICE \
 	README.md \
 	RELEASENOTES.md \
-	m4/get_version.sh
+	m4/get_version.sh \
+	contrib/scripts/release_version \
+	contrib/scripts/generate_release_tag \
+	contrib/scripts/generate_debian_changelog.sh \
+	contrib/scripts/generate_source_packages.sh \
+	tests/release/test_release_scripts.sh
 
 
 AM_DISTCHECK_CONFIGURE_FLAGS=$(NCCL_NET_OFI_DISTCHCK_CONFIGURE_FLAGS)
