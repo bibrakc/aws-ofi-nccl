@@ -1,7 +1,10 @@
-This file is a placeholder on the primary development branch of the
-OFI NCCL Plugin so that "make dist" works properly.  Release branches
-will have an accurate release history in this location, and each
-release tarball will also have up to date release notes.
+# v99.26.0a1 (2026-08-18)
 
-If you're looking for Plugin releases, please see the [Releases
-Page](https://github.com/aws/aws-ofi-nccl/releases).
+This is a synthetic alpha release for validating the aws-ofi-nccl private-draft
+release qualification process on the bibrakc fork. It is not intended for
+production use.
+
+* Validate compact alpha tag and package naming (`v99.26.0a1`).
+* Validate deterministic source-package metadata and the four-artifact manifest.
+* Validate that alpha GitHub releases remain drafts and are marked prereleases.
+* Validate the first stage of the alpha-to-final release progression.
