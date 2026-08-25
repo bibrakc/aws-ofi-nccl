@@ -1801,7 +1801,8 @@ protected:
 				nccl_net_ofi_rdma_domain_rail_t *domain_rail,
 				nccl_net_ofi_rdma_ep_rail_t *ep_rail,
 				nccl_net_ofi_rdma_cq_rail_t *cq_rail,
-				uint32_t tclass);
+				uint32_t tclass,
+				bool is_control);
 
 	/**
 	 * Associated GIN resources object
@@ -1828,8 +1829,13 @@ public:
 	nccl_net_ofi_rdma_device_rail_t(const nccl_net_ofi_rdma_device_rail_t&) = delete;
 	nccl_net_ofi_rdma_device_rail_t& operator=(const nccl_net_ofi_rdma_device_rail_t&) = delete;
 
-	/* NIC info */
-	struct fi_info *info;
+	/* Standard NIC info used to create data endpoints. */
+	struct fi_info *info = nullptr;
+
+	/* NIC info satisfying the single-entry inject requirement, used only
+	 * to create control endpoints. This is a duplicate of info when the
+	 * provider does not support the requested inject size. */
+	struct fi_info *control_info = nullptr;
 
 	/* Fabric handle */
 	ofi_fabric_ptr fabric;
@@ -1840,7 +1846,9 @@ public:
 	/**
 	 * @brief	Default RDMA plugin constructor
 	 */
-	nccl_net_ofi_rdma_plugin_t(struct fi_info *provider_list, nccl_ofi_topo_t *global_topo);
+	nccl_net_ofi_rdma_plugin_t(struct fi_info *provider_list,
+				   ofi_info_ptr control_provider_list,
+				   nccl_ofi_topo_t *global_topo);
 
 	/**
 	 * @brief	Default RDMA plugin destructor
@@ -1848,6 +1856,21 @@ public:
 	~nccl_net_ofi_rdma_plugin_t() override;
 
 	int complete_init() override;
+
+	/**
+	 * @brief Find inject-capable control provider information for the same NIC.
+	 *
+	 * @param data_info Standard provider information identifying the NIC.
+	 * @return Matching plugin-owned control provider information, or nullptr
+	 *         when the control endpoint must use standard provider information.
+	 */
+	const struct fi_info *find_control_provider_info(const struct fi_info *data_info) const;
+
+private:
+	/* Provider list requested with a single-entry RMA inject-size hint. It is
+	 * deliberately separate from the standard list used to build topology
+	 * and data endpoints. */
+	ofi_info_ptr control_provider_list;
 };
 
 /*

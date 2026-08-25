@@ -11,6 +11,7 @@
  *   2. Tag-matching search across entries
  *   3. Ready-bit (msg_seq_num) detection
  *   4. num_recvs boundary conditions
+ *   5. Single-entry inline and grouped-message size boundaries
  */
 
 #include "config.h"
@@ -138,6 +139,33 @@ static int test_ready_bit()
 	}
 
 	printf("PASS: ready bit\n");
+	return 0;
+}
+
+static int test_control_message_sizes()
+{
+	const size_t entry_size = sizeof(nccl_net_ofi_ctrl_msg_entry_t);
+	if (entry_size != 64) {
+		NCCL_OFI_WARN("unexpected control entry size: %zu", entry_size);
+		return 1;
+	}
+
+	for (uint16_t num_recvs = 1; num_recvs <= NCCL_OFI_MAX_RECVS; ++num_recvs) {
+		size_t message_size = num_recvs * entry_size;
+		if ((num_recvs == 1 && message_size != entry_size) ||
+		    (num_recvs > 1 && message_size <= entry_size)) {
+			NCCL_OFI_WARN("invalid control message size %zu for %u receives",
+				      message_size, num_recvs);
+			return 1;
+		}
+	}
+
+	if (sizeof(nccl_net_ofi_ctrl_msg_t) != NCCL_OFI_MAX_RECVS * entry_size) {
+		NCCL_OFI_WARN("control message capacity does not match entry array");
+		return 1;
+	}
+
+	printf("PASS: control message sizes\n");
 	return 0;
 }
 
@@ -433,6 +461,7 @@ int main(int argc, char *argv[])
 	int rc = 0;
 	rc |= test_tag_matching();
 	rc |= test_ready_bit();
+	rc |= test_control_message_sizes();
 	rc |= test_max_recvs_entries();
 	rc |= test_eager_sorted_insert();
 	rc |= test_eager_drain_chain();

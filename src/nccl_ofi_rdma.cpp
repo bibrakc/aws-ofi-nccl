@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "nccl_ofi.h"
 #include "nccl_ofi_log.h"
@@ -131,9 +132,18 @@ static pthread_mutex_t comm_cleanup_list_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Number of open (not finalizing) send and recv comms */
 static int num_open_comms = 0;
 
-/* Maximum size of inline RMA write operations */
+/* Maximum inline RMA sizes for the standard data QP and control QP.
+ * Initialized from the first endpoint. All devices are expected to use
+ * homogeneous data and control endpoint capabilities. */
 static size_t max_write_inline_size = 0;
+static size_t max_control_write_inline_size = 0;
 static bool is_max_write_inline_size_initialized = false;
+
+static inline bool use_inline_control_write(uint16_t num_recvs, size_t ctrl_msg_len)
+{
+	return ofi_nccl_control_msg_inject() && num_recvs == 1 &&
+	       ctrl_msg_len <= max_control_write_inline_size;
+}
 
 /* Pointer to flush sentinel */
 static uint64_t* flush_sentinel;
@@ -2565,16 +2575,17 @@ int rdma_rx_buff_req::post()
 
 int rdma_recv_req::post()
 {
-	/* Post the receiver's control message to the sender's ctrl
-	 * mailbox via fi_write.  Fat control message: write only the
-	 * populated entries (num_recvs * 64 bytes). */
+	/* Post the receiver's control message to the sender's control
+	 * mailbox. A single 64-byte entry uses an inline RDMA write when
+	 * the control endpoint supports injection; grouped receives retain the
+	 * registered write. */
 	nccl_net_ofi_rdma_recv_comm *r_comm = this->get_recv_comm();
 	nccl_net_ofi_rdma_ep_t *ep = (nccl_net_ofi_rdma_ep_t *)r_comm->ep.get();
 	nccl_net_ofi_scheduler *scheduler = ep->scheduler;
 	uint16_t rail_id;
 	uint16_t slot = this->msg_seq_num % NCCL_OFI_CTRL_MAILBOX_SIZE;
-	size_t ctrl_msg_len = r_comm->ctrl_mailbox[slot].entries[0].num_recvs
-			      * sizeof(nccl_net_ofi_ctrl_msg_entry_t);
+	uint16_t ctrl_num_recvs = r_comm->ctrl_mailbox[slot].entries[0].num_recvs;
+	size_t ctrl_msg_len = ctrl_num_recvs * sizeof(nccl_net_ofi_ctrl_msg_entry_t);
 	nccl_net_ofi_schedule_t *schedule = NULL;
 
 	if (ep->num_control_rails > 1) {
@@ -2593,15 +2604,47 @@ int rdma_recv_req::post()
 		rail_id = 0;
 	}
 
-	void *desc = fi_mr_desc(r_comm->ctrl_mr_handle->mr_data[rail_id].get());
 	nccl_net_ofi_rdma_recv_comm_rail_t *comm_rail = r_comm->get_control_rail(rail_id);
+	uint64_t remote_addr = r_comm->remote_mailbox_addr +
+			       slot * sizeof(nccl_net_ofi_ctrl_msg_t);
+	void *context = rdma_req_get_ofi_context(this, rail_id);
+	ssize_t rc;
 
-	ssize_t rc = fi_write(comm_rail->local_ep, &r_comm->ctrl_mailbox[slot],
-			      ctrl_msg_len, desc,
-			      comm_rail->remote_addr,
-			      r_comm->remote_mailbox_addr + slot * sizeof(nccl_net_ofi_ctrl_msg_t),
-			      r_comm->remote_mr_key[rail_id],
-			      rdma_req_get_ofi_context(this, rail_id));
+	if (use_inline_control_write(ctrl_num_recvs, ctrl_msg_len)) {
+		NCCL_OFI_TRACE(NCCL_NET,
+			       "Posting %zu-byte control message with FI_INJECT on rail %u",
+			       ctrl_msg_len, rail_id);
+		struct iovec iov = {};
+		struct fi_rma_iov rma_iov = {};
+		struct fi_msg_rma msg = {};
+
+		iov.iov_base = &r_comm->ctrl_mailbox[slot];
+		iov.iov_len = ctrl_msg_len;
+		rma_iov.addr = remote_addr;
+		rma_iov.len = ctrl_msg_len;
+		rma_iov.key = r_comm->remote_mr_key[rail_id];
+
+		msg.msg_iov = &iov;
+		msg.desc = nullptr;
+		msg.iov_count = 1;
+		msg.addr = comm_rail->remote_addr;
+		msg.rma_iov = &rma_iov;
+		msg.rma_iov_count = 1;
+		msg.context = context;
+		msg.data = 0;
+
+		/* FI_INJECT preserves the normal tracked completion for
+		 * fi_writemsg while making source-buffer reuse immediate. */
+		rc = fi_writemsg(comm_rail->local_ep, &msg, FI_INJECT);
+	} else {
+		NCCL_OFI_TRACE(NCCL_NET,
+			       "Posting %zu-byte control message with registered fi_write on rail %u",
+			       ctrl_msg_len, rail_id);
+		void *desc = fi_mr_desc(r_comm->ctrl_mr_handle->mr_data[rail_id].get());
+		rc = fi_write(comm_rail->local_ep, &r_comm->ctrl_mailbox[slot],
+			      ctrl_msg_len, desc, comm_rail->remote_addr,
+			      remote_addr, r_comm->remote_mr_key[rail_id], context);
+	}
 
 	if (rc == 0) {
 		NCCL_OFI_TRACE_WRITE_CTRL_START(this->dev_id, rail_id, this->comm, this, this->msg_seq_num);
@@ -6561,10 +6604,21 @@ int nccl_net_ofi_rdma_ep_t::ep_rail_init(int dev_id, uint16_t rail_id,
 					 nccl_net_ofi_rdma_domain_rail_t *domain_rail,
 					 nccl_net_ofi_rdma_ep_rail_t *ep_rail,
 					 nccl_net_ofi_rdma_cq_rail_t *cq_rail,
-					 uint32_t tclass)
+					 uint32_t tclass,
+					 bool is_control)
 {
 	int ret = 0;
-	struct fi_info *rail_info = dev_rail->info;
+	struct fi_info *rail_info = is_control ? dev_rail->control_info : dev_rail->info;
+	if (OFI_UNLIKELY(rail_info == nullptr || rail_info->tx_attr == nullptr)) {
+		NCCL_OFI_WARN("Missing provider information for %s rail %u",
+			      is_control ? "control" : "data", rail_id);
+		return -EINVAL;
+	}
+
+	NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
+		       "Creating %s QP on rail %u with RMA inject size %zu and TX queue size %zu",
+		       is_control ? "control" : "data", rail_id,
+		       rail_info->tx_attr->inject_size, rail_info->tx_attr->size);
 
 	auto av_result = nccl_ofi_ofiutils_av_create(domain_rail->domain);
 	if (OFI_UNLIKELY(av_result.is_failure())) {
@@ -6646,8 +6700,9 @@ int nccl_net_ofi_rdma_ep_t::init_rail_ofi_resources(nccl_net_ofi_rdma_device_t *
 		rail = this->rdma_endpoint_get_rail(rail_id);
 		cq_rail = this->rdma_endpoint_get_cq_rail(rail_id);
 
-		ret = nccl_net_ofi_rdma_ep_t::ep_rail_init(dev_id, rail_id, rail_dev, 
-							   domain_rail, rail, cq_rail, FI_TC_UNSPEC);
+		ret = nccl_net_ofi_rdma_ep_t::ep_rail_init(dev_id, rail_id, rail_dev,
+							   domain_rail, rail, cq_rail,
+							   FI_TC_UNSPEC, false);
 		if (ret != 0) {
 			NCCL_OFI_WARN("Initializing rail %d failed", rail_id);
 			return ret;
@@ -6663,7 +6718,8 @@ int nccl_net_ofi_rdma_ep_t::init_rail_ofi_resources(nccl_net_ofi_rdma_device_t *
 		cq_rail = this->rdma_endpoint_get_cq_rail(rail_id);
 
 		ret = nccl_net_ofi_rdma_ep_t::ep_rail_init(dev_id, rail_id, rail_dev,
-							   domain_rail, control_rail, cq_rail, tc);
+							   domain_rail, control_rail, cq_rail,
+							   tc, true);
 		if (ret != 0) {
 			NCCL_OFI_WARN("Initializing control rail %d failed", rail_id);
 			return ret;
@@ -6720,28 +6776,64 @@ nccl_net_ofi_rdma_ep_t::~nccl_net_ofi_rdma_ep_t()
 	}
 }
 
-static inline int init_max_write_inline_size_if_not_initialized(nccl_net_ofi_rdma_device_t *device,
-								nccl_net_ofi_rdma_ep_t *ep)
+static inline int get_endpoint_inline_size(struct fid_ep *ep, const struct fi_info *info,
+					   size_t *inline_size)
 {
-	int ret = 0;
-	if (is_max_write_inline_size_initialized == false) {
-		/* Overwrite default max_write_inline_size value if
-		 * FI_OPT_INJECT_RMA_SIZE option is available */
-		ret = get_inject_rma_size_opt(ep->rdma_endpoint_get_rail(0)->ofi_ep.get(),
-					      &max_write_inline_size);
-		if (ret == 0) {
-			is_max_write_inline_size_initialized = true;
-		} else if (ret == -FI_ENOPROTOOPT) {
-			max_write_inline_size = device->rdma_device_get_rail(0)->info->tx_attr->inject_size;
-			is_max_write_inline_size_initialized = true;
-			ret = 0;
-		} else {
-			NCCL_OFI_WARN("Failed to retrieve maximum write inline size");
+	int ret = get_inject_rma_size_opt(ep, inline_size);
+	if (ret == -FI_ENOPROTOOPT) {
+		if (info == nullptr || info->tx_attr == nullptr) {
+			return -EINVAL;
 		}
+		*inline_size = info->tx_attr->inject_size;
+		return 0;
 	}
 	return ret;
 }
 
+static inline int init_max_write_inline_size_if_not_initialized(nccl_net_ofi_rdma_device_t *device,
+								nccl_net_ofi_rdma_ep_t *ep)
+{
+	if (is_max_write_inline_size_initialized) {
+		return 0;
+	}
+
+	nccl_net_ofi_rdma_device_rail_t *device_rail = device->rdma_device_get_rail(0);
+	int ret = get_endpoint_inline_size(ep->rdma_endpoint_get_rail(0)->ofi_ep.get(),
+					   device_rail->info, &max_write_inline_size);
+	if (ret != 0) {
+		NCCL_OFI_WARN("Failed to retrieve data-QP maximum write inline size");
+		return ret;
+	}
+
+	ret = get_endpoint_inline_size(ep->rdma_endpoint_get_control_rail(0)->ofi_ep.get(),
+				       device_rail->control_info,
+				       &max_control_write_inline_size);
+	if (ret != 0) {
+		NCCL_OFI_WARN("Failed to retrieve control-QP maximum write inline size");
+		return ret;
+	}
+
+	is_max_write_inline_size_initialized = true;
+	struct fi_info *data_info = device_rail->info;
+	struct fi_info *control_info = device_rail->control_info;
+	/* Probe whether the configured control endpoint can inject the common
+	 * single-receive control message. Actual posts pass their runtime receive
+	 * count and message length to use_inline_control_write(). */
+	constexpr uint16_t single_recv_probe_num_recvs = 1;
+	constexpr size_t single_recv_probe_msg_len = sizeof(nccl_net_ofi_ctrl_msg_entry_t);
+	bool single_recv_control_msg_inject_active = use_inline_control_write(
+		single_recv_probe_num_recvs, single_recv_probe_msg_len);
+	NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
+		      "QP configuration: data RMA inject size %zu, TX queue size %zu; "
+		      "control RMA inject size %zu, TX queue size %zu; "
+		      "single-receive control-message injection %s",
+		      max_write_inline_size,
+		      data_info && data_info->tx_attr ? data_info->tx_attr->size : 0,
+		      max_control_write_inline_size,
+		      control_info && control_info->tx_attr ? control_info->tx_attr->size : 0,
+		      single_recv_control_msg_inject_active ? "enabled" : "disabled");
+	return 0;
+}
 
 std::shared_ptr<nccl_net_ofi_ep_t> nccl_net_ofi_rdma_domain_t::create_endpoint()
 {
@@ -6919,6 +7011,11 @@ void nccl_net_ofi_rdma_device_t::release_device_ofi_resources()
 	for (auto& rail : this->device_rails) {
 		if (rail.info) {
 			fi_freeinfo(rail.info);
+			rail.info = nullptr;
+		}
+		if (rail.control_info) {
+			fi_freeinfo(rail.control_info);
+			rail.control_info = nullptr;
 		}
 	}
 }
@@ -6932,15 +7029,27 @@ int nccl_net_ofi_rdma_device_t::create_device_rail_array(struct fi_info *info_li
 			goto error;
 		}
 
-		/* Duplicate NIC info */
+		/* The topology is built from the standard provider list, so this
+		 * duplicate is always used for data QPs. */
 		this->device_rails[i].info = fi_dupinfo(info_list);
 		if (this->device_rails[i].info == nullptr) {
 			goto error;
 		}
-		/* Libfabric documnetation is not clear if next is
-		 * copied or not with fi_dupinfo(), so assume the
-		 * worst */
 		this->device_rails[i].info->next = nullptr;
+
+		/* Match the same NIC in the separately queried inject-capable list.
+		 * If no wide entry exists, control QPs intentionally fall back to
+		 * the standard provider information. */
+		const auto *rdma_plugin =
+			static_cast<const nccl_net_ofi_rdma_plugin_t *>(this->plugin);
+		const struct fi_info *control_info =
+			rdma_plugin->find_control_provider_info(info_list);
+		this->device_rails[i].control_info =
+			fi_dupinfo(control_info != nullptr ? control_info : info_list);
+		if (this->device_rails[i].control_info == nullptr) {
+			goto error;
+		}
+		this->device_rails[i].control_info->next = nullptr;
 
 		info_list = info_list->next;
 	}
@@ -6951,6 +7060,11 @@ error:
 	for (int i = 0 ; i < num_infos ; i++) {
 		if (device_rails[i].info != nullptr) {
 			fi_freeinfo(device_rails[i].info);
+			device_rails[i].info = nullptr;
+		}
+		if (device_rails[i].control_info != nullptr) {
+			fi_freeinfo(device_rails[i].control_info);
+			device_rails[i].control_info = nullptr;
 		}
 	}
 	return -EINVAL;
@@ -7193,8 +7307,37 @@ int nccl_net_ofi_rdma_plugin_t::complete_init()
 }
 
 
-nccl_net_ofi_rdma_plugin_t::nccl_net_ofi_rdma_plugin_t(struct fi_info *provider_list, nccl_ofi_topo_t *global_topo)
-	: nccl_net_ofi_plugin_t(global_topo)
+static bool provider_info_matches_nic(const struct fi_info *a, const struct fi_info *b)
+{
+	if (a == nullptr || b == nullptr || a->domain_attr == nullptr ||
+	    b->domain_attr == nullptr || a->domain_attr->name == nullptr ||
+	    b->domain_attr->name == nullptr || a->fabric_attr == nullptr ||
+	    b->fabric_attr == nullptr || a->fabric_attr->prov_name == nullptr ||
+	    b->fabric_attr->prov_name == nullptr) {
+		return false;
+	}
+
+	return strcmp(a->domain_attr->name, b->domain_attr->name) == 0 &&
+	       strcmp(a->fabric_attr->prov_name, b->fabric_attr->prov_name) == 0;
+}
+
+const struct fi_info *nccl_net_ofi_rdma_plugin_t::find_control_provider_info(
+	const struct fi_info *data_info) const
+{
+	for (const struct fi_info *iter = control_provider_list.get(); iter != nullptr;
+	     iter = iter->next) {
+		if (provider_info_matches_nic(data_info, iter)) {
+			return iter;
+		}
+	}
+	return nullptr;
+}
+
+nccl_net_ofi_rdma_plugin_t::nccl_net_ofi_rdma_plugin_t(
+	struct fi_info *provider_list, ofi_info_ptr control_provider_list_arg,
+	nccl_ofi_topo_t *global_topo)
+	: nccl_net_ofi_plugin_t(global_topo),
+	  control_provider_list(std::move(control_provider_list_arg))
 {
 	int ret = 0;
 	int num_devices = 0;
@@ -7247,10 +7390,14 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 {
 	int ret = 0;
 	struct fi_info *provider_list = NULL;
+	struct fi_info *control_provider_list_raw = NULL;
+	ofi_info_ptr control_provider_list;
 	unsigned int num_providers;
+	unsigned int num_control_providers = 0;
 	nccl_net_ofi_rdma_plugin_t *plugin = NULL;
 	struct fi_info *hints;
 	uint32_t api_version = 0;
+	bool request_control_inject = ofi_nccl_control_msg_inject();
 
 	*found_multiple_rails = false;
 
@@ -7260,6 +7407,8 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 		return -FI_ENOMEM;
 	}
 
+	/* Always discover the primary provider list without the control-message
+	 * inject hint. This list drives topology, domains, and data-QP creation. */
 	get_hints(hints);
 	/*
 	 * Select libfabric API version.
@@ -7286,6 +7435,30 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 	}
 	ret = nccl_ofi_ofiutils_get_providers(provider_filter, api_version, hints,
 					      &provider_list, &num_providers);
+	if (ret == 0 && request_control_inject) {
+		/* A second query requests enough inject space for one control entry.
+		 * It is used exclusively for control endpoints; the standard provider
+		 * list above remains untouched. */
+		hints->tx_attr->inject_size = sizeof(nccl_net_ofi_ctrl_msg_entry_t);
+		ret = nccl_ofi_ofiutils_get_providers(provider_filter, api_version, hints,
+						      &control_provider_list_raw,
+						      &num_control_providers);
+		if (ret == 0) {
+			control_provider_list.reset(control_provider_list_raw);
+		} else {
+			if (ret == -FI_ENODATA) {
+				NCCL_OFI_INFO(NCCL_INIT | NCCL_NET,
+					      "Control-message injection is unavailable; control endpoints will use standard provider information");
+			} else {
+				NCCL_OFI_WARN("Control-inject provider query failed: %s; "
+					      "control endpoints will use standard provider information",
+					      fi_strerror(-ret));
+			}
+			/* Control-message injection is optional. Preserve the standard
+			 * provider list and registered control-write fallback. */
+			ret = 0;
+		}
+	}
 	if (ret == 0) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET, "Using Libfabric %u.%u API, with %s support",
 			       FI_MAJOR(api_version),
@@ -7375,7 +7548,8 @@ int nccl_net_ofi_rdma_init(const char *provider_filter,
 		return -ENOTSUP;
 	}
 
-	plugin = new nccl_net_ofi_rdma_plugin_t(provider_list, topo);
+	plugin = new nccl_net_ofi_rdma_plugin_t(provider_list,
+					      std::move(control_provider_list), topo);
 
 	/**
 	 * NCCL's topology detection will set NIC PCIe link speed based on the

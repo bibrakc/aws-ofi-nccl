@@ -130,6 +130,13 @@ OFI_NCCL_PARAM(PROTOCOL, protocol, "PROTOCOL", PROTOCOL::SENDRECV);
 OFI_NCCL_PARAM(bool, disable_native_rdma_check, "DISABLE_NATIVE_RDMA_CHECK", false);
 
 /*
+ * Enable injecting single-receive RDMA control messages. Provider information
+ * satisfying the control-message inject size is used only for control
+ * endpoints. Unsupported providers retain registered control writes.
+ */
+OFI_NCCL_PARAM(bool, control_msg_inject, "CONTROL_MSG_INJECT", true);
+
+/*
  * Disable the check for required GDR support on EC2 instances. When this check
  * is disabled, the plugin can be used without GDR support even on platforms
  * that support GDR (P4d and later). By default, the plugin performs the check.
