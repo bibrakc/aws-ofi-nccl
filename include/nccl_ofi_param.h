@@ -109,6 +109,27 @@ OFI_NCCL_PARAM(size_t, cq_read_count, "CQ_READ_COUNT", 4);
 OFI_NCCL_PARAM(size_t, gin_cq_process_max_iter, "GIN_CQ_PROCESS_MAX_ITER", 4);
 
 /*
+ * Number of consecutive single-stripe GIN puts coalesced onto one rail (legacy
+ * pinned policy) or grouped between doorbell boundaries (round-robin one-tail
+ * policy) before the boundary op rings the deferred doorbell(s). Runtime
+ * override of the historical compile-time GIN_REQS_PER_DOORBELL value; used by
+ * both the legacy pin path and the RR one-tail-per-rail path. Defaults to 16.
+ */
+OFI_NCCL_PARAM(size_t, gin_reqs_per_doorbell, "GIN_REQS_PER_DOORBELL", 16);
+
+/*
+ * Replace the legacy single-rail FI_MORE pinning policy with a strict
+ * round-robin, one-unposted-tail-per-rail doorbell policy. Writes are placed
+ * strictly round-robin across all active rails while doorbell aggregation is
+ * retained by holding exactly one real, never-posted "tail" request per rail.
+ * At a group boundary the arriving real request terminates its own rail and
+ * the retained real tails terminate the other rails, all without FI_MORE and
+ * without any dummy WQEs. Default-off; when disabled the plugin makes
+ * byte-for-byte identical decisions to the legacy pin path.
+ */
+OFI_NCCL_PARAM(bool, gin_rr_tail_flush, "GIN_RR_TAIL_FLUSH", false);
+
+/*
  * Completion queue size. Defaults to EFA RDM path size.
  */
 OFI_NCCL_PARAM(size_t, cq_size, "CQ_SIZE", 12288);

@@ -8,6 +8,7 @@
 #include "rdma/gin/nccl_ofi_gin_allgather.h"
 #include "rdma/gin/nccl_ofi_gin_resources.h"
 #include "rdma/gin/nccl_ofi_gin_types.h"
+#include "rdma/gin/nccl_ofi_gin_rr_tail.h"
 #include "nccl_ofi_dlist.h"
 #include "nccl_ofi_mpsc_ring.h"
 #include "nccl_ofi_spsc_ring.h"
@@ -591,6 +592,31 @@ public:
 		       nccl_ofi_gin_symm_mr_handle_t *signalMhandle, uint64_t signalValue, uint32_t signalOp,
 		       uint32_t optFlags, nccl_ofi_gin_req_t **request) override;
 
+	/* Round-robin one-tail-per-rail implementation of iputSignal. Only
+	 * reached when OFI_NCCL_GIN_RR_TAIL_FLUSH is enabled. Strict
+	 * round-robin placement, one retained never-posted real tail per rail,
+	 * no dummy WQEs. Requires ep_lock (taken internally like iputSignal). */
+	int iputSignalRR(uint64_t srcOff, nccl_ofi_gin_symm_mr_handle_t *srcMhandle, size_t size,
+			 uint64_t dstOff, nccl_ofi_gin_symm_mr_handle_t *dstMhandle, uint32_t rank,
+			 uint64_t signalOff, nccl_ofi_gin_symm_mr_handle_t *signalMhandle,
+			 uint64_t signalValue, uint32_t signalOp, uint32_t optFlags,
+			 nccl_ofi_gin_req_t **request);
+
+	/* Assign the final FI_MORE / no-FI_MORE flag on a never-posted retained
+	 * write request and post it exactly once. On -FI_EAGAIN, ownership moves
+	 * to the existing pending queue (retry drops FI_MORE and rings the rail);
+	 * the caller clears the engine slot. On a hard error the request's
+	 * umbrella pending flag back-pointer is cleared and the request is
+	 * returned to the pool before returning -errno. Caller holds ep_lock. */
+	int rr_post_write_request(nccl_net_ofi_gin_write_req_t *wreq, uint16_t rail,
+				  bool fi_more) REQUIRES(get_ep_lock());
+
+	/* Fail-safe drain of any retained RR tails at close/quiesce. The normal
+	 * nonaggregate end-of-batch already empties all tails; this only fires
+	 * if an unexpected tail survives, and it never silently hangs. Caller
+	 * holds ep_lock. */
+	void rr_close_failsafe_drain() REQUIRES(get_ep_lock());
+
 	int iget(uint64_t remoteOff, nccl_ofi_gin_symm_mr_handle_t *remoteMhandle,
 		 size_t size, uint64_t localOff, nccl_ofi_gin_symm_mr_handle_t *localMhandle,
 		 uint32_t rank, uint32_t optFlags, nccl_ofi_gin_req_t **request) override;
@@ -676,8 +702,22 @@ private:
 	   -1 means no pin (consult get_next_rail()). Guarded by ep_lock. */
 	int pinned_rail_id = -1;
 	/* Count of ops coalesced onto pinned_rail_id so far. The pin rotates to
-	   the next rail after GIN_REQS_PER_DOORBELL. Guarded by ep_lock. */
+	   the next rail after reqs_per_doorbell. Guarded by ep_lock. */
 	uint32_t pinned_rail_run = 0;
+	/* Runtime doorbell grouping interval (OFI_NCCL_GIN_REQS_PER_DOORBELL);
+	   defaults to the historical value 16. Used by both the legacy pinned
+	   path and the RR one-tail-per-rail path. Cached at construction. */
+	uint32_t reqs_per_doorbell = GIN_REQS_PER_DOORBELL;
+	/* Cached from OFI_NCCL_GIN_RR_TAIL_FLUSH at construction. When set, the
+	   strict round-robin one-unposted-tail-per-rail doorbell policy replaces
+	   the legacy single-rail FI_MORE pin. Default-off; when clear the legacy
+	   pin path makes byte-for-byte identical decisions at default params. */
+	bool rr_tail_flush_enabled = false;
+	/* RR-tail policy engine. Only allocated/used when rr_tail_flush_enabled;
+	   holds at most one never-posted write request per rail. Guarded by
+	   ep_lock. */
+	std::unique_ptr<nccl_ofi_gin_rr_tail_engine_t<nccl_net_ofi_gin_write_req_t *>>
+		rr_tail_engine;
 	/* For each rail, direct-indexed table of fi_addr => peer comm rank.
 	 * Requires FI_AV_TABLE so that fi_addr_t values are dense 0-based
 	 * indices. Unused slots are set to UINT32_MAX as a sentinel. */

@@ -386,6 +386,24 @@ public:
 	int handle_cq_entry(struct fi_cq_entry *cq_entry_base, fi_addr_t src_addr,
 			    uint16_t rail_id) override;
 
+	/**
+	 * Set the fi_writemsg flags on a NEVER-POSTED request.
+	 *
+	 * Used by the round-robin one-tail-per-rail doorbell policy
+	 * (OFI_NCCL_GIN_RR_TAIL_FLUSH): a request may be retained UNPOSTED as a
+	 * rail's tail and only later receive its final FI_MORE / no-FI_MORE
+	 * decision immediately before its single post(). A request is posted
+	 * exactly once, so mutating flags here does not change any
+	 * already-posted WQE (whose FI_MORE cannot be altered). Do not call
+	 * after post().
+	 *
+	 * @param new_flags: the complete fi_writemsg flag set to use on post().
+	 */
+	void set_flags(uint64_t new_flags)
+	{
+		flags = new_flags;
+	}
+
 private:
 	struct fid_ep *ep;
 	void *src;
@@ -397,7 +415,8 @@ private:
 	uint64_t key;
 	/* Flags for fi_writemsg. On retry FI_MORE is dropped as the
 	   request must be handled immediately and should not remain
-	   pending in the queue. */
+	   pending in the queue. Also settable via set_flags() while the
+	   request is retained UNPOSTED by the RR one-tail-per-rail policy. */
 	uint64_t flags;
 public:
 	/* Placed after private fields for cache locality with post() hot path above.
