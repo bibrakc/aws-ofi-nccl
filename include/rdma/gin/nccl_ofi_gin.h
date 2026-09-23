@@ -17,6 +17,7 @@
 #include "nccl_ofi_gdrcopy.h"
 #include "nccl_ofi_tracepoint.h"
 
+#include <array>
 #include <bitset>
 #include <atomic>
 #include <cstdint>
@@ -591,6 +592,33 @@ public:
 		       nccl_ofi_gin_symm_mr_handle_t *signalMhandle, uint64_t signalValue, uint32_t signalOp,
 		       uint32_t optFlags, nccl_ofi_gin_req_t **request) override;
 
+	/* Assign the final FI_MORE / no-FI_MORE flag on a never-posted write
+	   request and post it exactly once. On -FI_EAGAIN ownership moves to the
+	   existing pending queue (retry drops FI_MORE and rings the rail) and this
+	   returns 0: a queued retry is a successful hand-off, not a failure. On a
+	   hard error the failure is recorded through the request's `status`
+	   back-pointer onto its ORIGINAL umbrella (not whichever op flushed it),
+	   its pending flag and status back-pointers are cleared, and the request
+	   is returned to the pool. Caller holds ep_lock. */
+	int post_tail_request(nccl_net_ofi_gin_write_req_t *wreq, uint16_t rail,
+			      bool fi_more) REQUIRES(get_ep_lock());
+
+	/* Flush the PRIOR retained tail on `rail` (if any) with the given FI_MORE
+	   flag, clearing the slot BEFORE posting so a hard error's cleanup path
+	   cannot see a stale tail pointer. A hard error is recorded on the tail's
+	   original umbrella by post_tail_request, so it is only warned about here.
+	   Caller holds ep_lock. */
+	void flush_tail(uint16_t rail, bool fi_more) REQUIRES(get_ep_lock());
+
+	/* Flush every retained tail except `except_rail` with no FI_MORE (ring
+	   their doorbells now). Caller holds ep_lock. */
+	void flush_other_tails(uint16_t except_rail) REQUIRES(get_ep_lock());
+
+	/* Drain every retained tail with real no-FI_MORE posts. Used at
+	   communicator close/quiesce so no retained request is ever left un-rung.
+	   Caller holds ep_lock. */
+	void close_drain() REQUIRES(get_ep_lock());
+
 	int iget(uint64_t remoteOff, nccl_ofi_gin_symm_mr_handle_t *remoteMhandle,
 		 size_t size, uint64_t localOff, nccl_ofi_gin_symm_mr_handle_t *localMhandle,
 		 uint32_t rank, uint32_t optFlags, nccl_ofi_gin_req_t **request) override;
@@ -671,13 +699,17 @@ private:
 	CUcontext gdrcopy_cuda_ctx = nullptr;
 
 	/* --- TIER 2: Receiver side — every CQ completion --- */
-	/* Rail pinned across an aggregated iputSignal sequence: when an op is
-	   posted with FI_MORE, the next op must reuse this rail to flush it.
-	   -1 means no pin (consult get_next_rail()). Guarded by ep_lock. */
-	int pinned_rail_id = -1;
-	/* Count of ops coalesced onto pinned_rail_id so far. The pin rotates to
-	   the next rail after GIN_REQS_PER_DOORBELL. Guarded by ep_lock. */
-	uint32_t pinned_rail_run = 0;
+	/* Strict round-robin, one-unposted-tail-per-rail doorbell policy state.
+	   This is the sole iputSignal doorbell policy: writes are placed round
+	   robin across all active rails while doorbell aggregation is retained by
+	   holding exactly one real, never-posted "tail" write per rail. A retained
+	   tail keeps a back-pointer to its original umbrella, so whichever later
+	   op flushes it still attributes any error to the op that created it. The
+	   doorbell interval is the compile-time constant GIN_REQS_PER_DOORBELL.
+	   All three fields are guarded by ep_lock. */
+	std::array<nccl_net_ofi_gin_write_req_t *, MAX_NUM_RAILS> tail {};
+	uint32_t requests_since_doorbell = 0;
+	uint16_t next_rail = 0;
 	/* For each rail, direct-indexed table of fi_addr => peer comm rank.
 	 * Requires FI_AV_TABLE so that fi_addr_t values are dense 0-based
 	 * indices. Unused slots are set to UINT32_MAX as a sentinel. */
@@ -729,14 +761,6 @@ private:
 	 */
 	int send_ack(nccl_ofi_rdma_gin_put_comm &gin_comm, uint32_t peer_rank,
 		     uint32_t rx_consumed) REQUIRES(get_ep_lock());
-
-	/* Update the pinned-rail state after an op posted on `rail_id`:
-	   - deferring: this op kept its doorbell (FI_MORE); hold the rail and
-	     count it toward the rotation interval.
-	   - otherwise: this op rang its doorbell, so nothing is left deferred;
-	     release the pin (the next op re-pins on the scheduler's rail). */
-	void update_pin(bool defer, uint16_t rail_id)
-		REQUIRES(get_ep_lock());
 
 	/* Look up the signal's GDRCopy handle in mr_handle_map and fill `work`
 	   with everything the worker needs to apply the read-modify-write.
