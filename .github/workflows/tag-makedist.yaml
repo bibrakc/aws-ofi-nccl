@@ -1,10 +1,12 @@
 name: make `make dist` tarball
 on:
   workflow_dispatch:
+  # v* release tags are built, distchecked, and packaged by
+  # generate-release-draft.yml; building them here as well produced a second,
+  # unrelated tarball for the same tag.
   push:
     tags:
       - release/**
-      - v**
 
 permissions:
   contents: read
@@ -32,12 +34,12 @@ jobs:
     runs-on: ubuntu-latest
     container: ${{ matrix.container }}
     name: make dist for tag ${{ github.ref_name }}
-    env:
-      PLUGIN_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
     steps:
       - run: |
           yum -y update && yum -y install git tar util-linux findutils yum-utils
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Fix Git Configuration
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -75,7 +77,7 @@ jobs:
       - name: Call `make distcheck`
         run: make distcheck V=1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "${{ github.ref_name }} make dist output"
           path: "*.tar*"
