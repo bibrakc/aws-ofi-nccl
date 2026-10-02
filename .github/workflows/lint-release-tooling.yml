@@ -1,0 +1,90 @@
+name: Lint release tooling
+
+# Static checks for the release workflows and the scripts they run.
+# Scoped to release tooling so existing CI workflows are not gated on
+# findings they predate.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/generate-release-draft.yml'
+      - '.github/workflows/tag-makedist.yaml'
+      - '.github/workflows/lint-release-tooling.yml'
+      - '.github/scripts/**'
+      - '.github/zizmor.yml'
+      - 'contrib/scripts/**'
+      - 'm4/get_version.sh'
+  push:
+    branches:
+      - master
+      - 'v*.x'
+    paths:
+      - '.github/workflows/generate-release-draft.yml'
+      - '.github/workflows/tag-makedist.yaml'
+      - '.github/workflows/lint-release-tooling.yml'
+      - '.github/scripts/**'
+      - '.github/zizmor.yml'
+      - 'contrib/scripts/**'
+      - 'm4/get_version.sh'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: lint-release-tooling-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run actionlint
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          files: >-
+            .github/workflows/generate-release-draft.yml,
+            .github/workflows/tag-makedist.yaml,
+            .github/workflows/lint-release-tooling.yml
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run shellcheck
+        run: |
+          shellcheck --version
+          shellcheck \
+            .github/scripts/*.sh \
+            contrib/scripts/release_version \
+            contrib/scripts/generate_release_tag \
+            contrib/scripts/generate_source_packages.sh \
+            contrib/scripts/generate_debian_changelog.sh \
+            m4/get_version.sh
+
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          inputs: >-
+            .github/workflows/generate-release-draft.yml
+            .github/workflows/tag-makedist.yaml
+            .github/workflows/lint-release-tooling.yml
+          # Fail the job on findings instead of uploading SARIF, so this works
+          # on forks without code scanning enabled.
+          advanced-security: false

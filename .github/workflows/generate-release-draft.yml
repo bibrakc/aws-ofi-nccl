@@ -8,24 +8,32 @@ on:
     tags:
       - 'v*.*.*'
 
-permissions:
-  contents: write
-  packages: read
+# Each job requests only what it needs. Only create-release can write.
+permissions: {}
+
+# One run per tag at a time; never cancel a run that may be creating a release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   metadata:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.parse.outputs.tag }}
       version: ${{ steps.parse.outputs.version }}
+      base_version: ${{ steps.parse.outputs.base_version }}
       is_alpha: ${{ steps.parse.outputs.is_alpha }}
       tarball: ${{ steps.parse.outputs.tarball }}
       dsc: ${{ steps.parse.outputs.dsc }}
       debian_tar: ${{ steps.parse.outputs.debian_tar }}
       srpm: ${{ steps.parse.outputs.srpm }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           sparse-checkout: contrib/scripts/release_version
           sparse-checkout-cone-mode: false
 
@@ -39,6 +47,7 @@ jobs:
           {
             echo "tag=${TAG}"
             echo "version=${VERSION}"
+            echo "base_version=${BASE_VERSION}"
             echo "is_alpha=${IS_ALPHA}"
             echo "tarball=${TARBALL}"
             echo "dsc=${DSC}"
@@ -48,6 +57,9 @@ jobs:
 
   build:
     needs: metadata
+    permissions:
+      contents: read
+      packages: read
     strategy:
       matrix:
         include:
@@ -63,11 +75,16 @@ jobs:
     name: Build for ${{ matrix.name }}
     env:
       PLUGIN_TAG: ${{ needs.metadata.outputs.tag }}
+      TARBALL: ${{ needs.metadata.outputs.tarball }}
+      DSC: ${{ needs.metadata.outputs.dsc }}
+      DEBIAN_TAR: ${{ needs.metadata.outputs.debian_tar }}
+      SRPM: ${{ needs.metadata.outputs.srpm }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.ref }}
+          persist-credentials: false
 
       - name: Configure and build
         run: |
@@ -86,18 +103,13 @@ jobs:
       - name: Generate source packages
         if: matrix.generate_packages
         run: |
-          echo "Generating packages for tag: ${{ needs.metadata.outputs.tag }}"
-          ./contrib/scripts/generate_source_packages.sh "${{ needs.metadata.outputs.tag }}"
+          echo "Generating packages for tag: ${PLUGIN_TAG}"
+          ./contrib/scripts/generate_source_packages.sh "${PLUGIN_TAG}"
 
       - name: Validate expected artifacts
         if: matrix.generate_packages
         run: |
           set -e
-          TARBALL="${{ needs.metadata.outputs.tarball }}"
-          DSC="${{ needs.metadata.outputs.dsc }}"
-          DEBIAN_TAR="${{ needs.metadata.outputs.debian_tar }}"
-          SRPM="${{ needs.metadata.outputs.srpm }}"
-
           for f in "${TARBALL}" "${DSC}" "${DEBIAN_TAR}" "${SRPM}"; do
             if [ ! -f "${f}" ]; then
               echo "ERROR: Expected artifact missing: ${f}" >&2
@@ -107,35 +119,9 @@ jobs:
           done
           echo "All four expected artifacts present."
 
-      - name: Prepare release notes
-        if: matrix.generate_packages
-        run: |
-          TAG="${{ needs.metadata.outputs.tag }}"
-          TARBALL="${{ needs.metadata.outputs.tarball }}"
-
-          cat > release-notes.awk <<'AWK'
-          BEGIN { found=0; printing=0; }
-          index($0, "# " version " (") == 1 { found=1; printing=1; print; next }
-          printing==1 && $0 ~ "^# v[0-9]" { printing=0; exit }
-          printing==1 { print }
-          END {
-            if (!found) {
-              print "No specific release notes found for version " version > "/dev/stderr"
-              exit 1
-            }
-          }
-          AWK
-          awk -v version="${TAG}" -f release-notes.awk RELEASENOTES.md > RELEASE_NOTES.md
-          rm -f release-notes.awk
-
-          # Append checksum for the tarball
-          CHECKSUM=$(sha512sum "${TARBALL}")
-          printf "\nChecksum (sha512) for the release tarball \`%s\`:\n\n\`\`\`\n%s\n\`\`\`\n" \
-            "${TARBALL}" "${CHECKSUM}" >> RELEASE_NOTES.md
-
       - name: Upload artifacts
         if: matrix.generate_packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packages-${{ matrix.name }}
           path: |
@@ -143,70 +129,127 @@ jobs:
             ${{ needs.metadata.outputs.dsc }}
             ${{ needs.metadata.outputs.debian_tar }}
             ${{ needs.metadata.outputs.srpm }}
-            release-manifest.txt
-            RELEASE_NOTES.md
           if-no-files-found: error
 
   create-release:
     needs: [metadata, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the draft release and upload assets
+      id-token: write      # obtain the OIDC token used to sign attestations
+      attestations: write  # store the attestations
+    env:
+      TAG: ${{ needs.metadata.outputs.tag }}
+      VERSION: ${{ needs.metadata.outputs.version }}
+      BASE_VERSION: ${{ needs.metadata.outputs.base_version }}
+      IS_ALPHA: ${{ needs.metadata.outputs.is_alpha }}
+      TARBALL: ${{ needs.metadata.outputs.tarball }}
+      DSC: ${{ needs.metadata.outputs.dsc }}
+      DEBIAN_TAR: ${{ needs.metadata.outputs.debian_tar }}
+      SRPM: ${{ needs.metadata.outputs.srpm }}
+      REPO: ${{ github.repository }}
+      SERVER_URL: ${{ github.server_url }}
+      COMMIT: ${{ github.sha }}
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - name: Checkout release notes and tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+          sparse-checkout: |
+            RELEASENOTES.md
+            .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: packages-ubuntu
+          path: release-artifacts
 
-      - name: Validate artifacts before release
+      - name: Validate artifact set
         run: |
-          set -e
-          TARBALL="${{ needs.metadata.outputs.tarball }}"
-          DSC="${{ needs.metadata.outputs.dsc }}"
-          DEBIAN_TAR="${{ needs.metadata.outputs.debian_tar }}"
-          SRPM="${{ needs.metadata.outputs.srpm }}"
+          set -euo pipefail
+          expected=$(printf '%s\n' "${TARBALL}" "${DSC}" "${DEBIAN_TAR}" "${SRPM}" | sort)
+          actual=$(find release-artifacts -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [ "${expected}" != "${actual}" ]; then
+            echo "ERROR: release artifact set does not match the expected four files" >&2
+            diff <(echo "${expected}") <(echo "${actual}") >&2 || true
+            exit 1
+          fi
+          echo "Artifact set matches exactly:"
+          (cd release-artifacts && sha256sum "${TARBALL}" "${DSC}" "${DEBIAN_TAR}" "${SRPM}")
 
-          for f in "${TARBALL}" "${DSC}" "${DEBIAN_TAR}" "${SRPM}" release-manifest.txt; do
-            if [ ! -f "${f}" ]; then
-              echo "ERROR: Expected file missing: ${f}" >&2
-              ls -la
-              exit 1
-            fi
-          done
-          echo "All release files present."
-
-      - name: Generate release metadata
-        run: |
-          cat > release-metadata.json <<EOF
-          {
-            "tag": "${{ needs.metadata.outputs.tag }}",
-            "version": "${{ needs.metadata.outputs.version }}",
-            "is_alpha": ${{ needs.metadata.outputs.is_alpha }},
-            "commit": "${{ github.sha }}",
-            "workflow_run_id": "${{ github.run_id }}",
-            "artifacts": [
-              "${{ needs.metadata.outputs.tarball }}",
-              "${{ needs.metadata.outputs.dsc }}",
-              "${{ needs.metadata.outputs.debian_tar }}",
-              "${{ needs.metadata.outputs.srpm }}"
-            ]
-          }
-          EOF
-
-      - name: Display structure of downloaded files
-        run: ls -la
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
+          subject-path: |
+            release-artifacts/${{ needs.metadata.outputs.tarball }}
+            release-artifacts/${{ needs.metadata.outputs.dsc }}
+            release-artifacts/${{ needs.metadata.outputs.debian_tar }}
+            release-artifacts/${{ needs.metadata.outputs.srpm }}
+
+      - name: Find previous final release
+        id: prev
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(gh api "repos/${REPO}/releases" --paginate \
+                       --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+                     | bash .github/scripts/find-previous-release.sh "${BASE_VERSION}")
+          echo "Previous final release: ${PREV_TAG:-(none)}"
+          echo "tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Render release body
+        env:
+          PREV_TAG: ${{ steps.prev.outputs.tag }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/render-release-body.sh \
+            "release-artifacts/${TARBALL}" \
+            "release-artifacts/${DSC}" \
+            "release-artifacts/${DEBIAN_TAR}" \
+            "release-artifacts/${SRPM}" > RELEASE_BODY.md
+          cat RELEASE_BODY.md
+
+      - name: Create draft release
+        id: release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ needs.metadata.outputs.tag }}
           name: AWS OFI NCCL ${{ needs.metadata.outputs.tag }}
           draft: true
           prerelease: ${{ needs.metadata.outputs.is_alpha == 'true' }}
-          body_path: RELEASE_NOTES.md
+          body_path: RELEASE_BODY.md
+          fail_on_unmatched_files: true
           files: |
-            ${{ needs.metadata.outputs.tarball }}
-            ${{ needs.metadata.outputs.dsc }}
-            ${{ needs.metadata.outputs.debian_tar }}
-            ${{ needs.metadata.outputs.srpm }}
-            release-manifest.txt
-            release-metadata.json
+            release-artifacts/${{ needs.metadata.outputs.tarball }}
+            release-artifacts/${{ needs.metadata.outputs.dsc }}
+            release-artifacts/${{ needs.metadata.outputs.debian_tar }}
+            release-artifacts/${{ needs.metadata.outputs.srpm }}
+
+      - name: Release summary
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_URL: ${{ steps.release.outputs.url }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+        run: |
+          {
+            echo "## Draft release ${TAG}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Alpha | ${IS_ALPHA} |"
+            echo "| Commit | [\`${COMMIT}\`](${SERVER_URL}/${REPO}/commit/${COMMIT}) |"
+            echo "| Draft release | ${RELEASE_URL} |"
+            echo "| Attestation | ${ATTESTATION_URL} |"
+            echo
+            echo "<details><summary>Release body</summary>"
+            echo
+            cat RELEASE_BODY.md
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"

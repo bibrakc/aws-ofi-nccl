@@ -115,23 +115,7 @@ if [[ -f "${DSC}" ]]; then
 	fi
 fi
 
-# --- Generate SHA256 manifest ---
-echo "=== Generating release manifest ==="
-manifest_file="release-manifest.txt"
-{
-	echo "# AWS OFI NCCL Release Manifest"
-	echo "# Tag: ${TAG}"
-	echo "# Version: ${VERSION}"
-	echo "# IS_ALPHA: ${IS_ALPHA}"
-	echo "# Generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-	echo "#"
-	echo "# SHA256 checksums for release artifacts:"
-	sha256sum "${TARBALL}" "${DSC}" "${DEBIAN_TAR}" "${SRPM}"
-} > "${manifest_file}"
-
 echo ""
 echo "=== Release artifacts generated successfully ==="
-cat "${manifest_file}"
-echo ""
-echo "Artifacts:"
-ls -la "${TARBALL}" "${DSC}" "${DEBIAN_TAR}" "${SRPM}" "${manifest_file}"
+ls -la "${TARBALL}" "${DSC}" "${DEBIAN_TAR}" "${SRPM}"
+sha256sum "${TARBALL}" "${DSC}" "${DEBIAN_TAR}" "${SRPM}"
