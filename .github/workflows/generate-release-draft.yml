@@ -151,6 +151,29 @@ jobs:
       SERVER_URL: ${{ github.server_url }}
       COMMIT: ${{ github.sha }}
     steps:
+      # Runs first so that a rerun for a tag that already has a release stops
+      # before anything is attested or uploaded for it.
+      - name: Refuse an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Never modify an existing release for this tag (drafts included;
+          # GitHub allows several drafts per tag). A candidate is immutable:
+          # fix forward with the next alpha instead.
+          existing=$(gh api "repos/${REPO}/releases" --paginate \
+                       --jq '.[] | select(.tag_name == env.TAG) | .html_url')
+          if [ -n "${existing}" ]; then
+            echo "::error title=Release already exists::${TAG} already has a release: ${existing}"
+            echo "Refusing to modify an existing release; release candidates are immutable." >&2
+            echo "- If that release is complete or was handed to qualification, fix forward" >&2
+            echo "  with the next alpha tag." >&2
+            echo "- If it is an incomplete draft that nobody has qualified (for example, an" >&2
+            echo "  asset upload failed), a maintainer may delete the draft release (never" >&2
+            echo "  the tag) and rerun this workflow." >&2
+            exit 1
+          fi
+
       - name: Checkout release notes and tooling
         uses: actions/checkout@v7
         with:
@@ -221,22 +244,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Never modify an existing release for this tag (drafts included;
-          # GitHub allows several drafts per tag). A candidate is immutable:
-          # fix forward with the next alpha instead.
-          existing=$(gh api "repos/${REPO}/releases" --paginate \
-                       --jq '.[] | select(.tag_name == env.TAG) | .html_url')
-          if [ -n "${existing}" ]; then
-            echo "::error title=Release already exists::${TAG} already has a release: ${existing}"
-            echo "Refusing to modify an existing release; release candidates are immutable." >&2
-            echo "- If that release is complete or was handed to qualification, fix forward" >&2
-            echo "  with the next alpha tag." >&2
-            echo "- If it is an incomplete draft that nobody has qualified (for example, an" >&2
-            echo "  asset upload failed), a maintainer may delete the draft release (never" >&2
-            echo "  the tag) and rerun this workflow." >&2
-            exit 1
-          fi
-
           args=(--repo "${REPO}" --verify-tag --draft
                 --title "AWS OFI NCCL ${TAG}" --notes-file RELEASE_BODY.md)
           if [ "${IS_ALPHA}" = "true" ]; then
