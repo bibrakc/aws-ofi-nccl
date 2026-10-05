@@ -11,7 +11,6 @@ on:
       - '.github/workflows/tag-makedist.yaml'
       - '.github/workflows/lint-release-tooling.yml'
       - '.github/scripts/**'
-      - '.github/zizmor.yml'
       - 'contrib/scripts/**'
       - 'm4/get_version.sh'
   push:
@@ -23,7 +22,6 @@ on:
       - '.github/workflows/tag-makedist.yaml'
       - '.github/workflows/lint-release-tooling.yml'
       - '.github/scripts/**'
-      - '.github/zizmor.yml'
       - 'contrib/scripts/**'
       - 'm4/get_version.sh'
   workflow_dispatch:
@@ -85,6 +83,7 @@ jobs:
             .github/workflows/generate-release-draft.yml
             .github/workflows/tag-makedist.yaml
             .github/workflows/lint-release-tooling.yml
+          version: 1.30.1
           # Fail the job on findings instead of uploading SARIF, so this works
           # on forks without code scanning enabled.
           advanced-security: false

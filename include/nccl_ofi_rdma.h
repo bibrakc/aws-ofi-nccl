@@ -338,7 +338,6 @@ typedef struct nccl_net_ofi_flush_data {
 class nccl_net_ofi_rdma_device_t;
 class nccl_net_ofi_rdma_domain_t;
 class nccl_net_ofi_rdma_ep_t;
-class nccl_ofi_gin_resources;
 
 class nccl_net_ofi_rdma_device_rail_t;
 class nccl_net_ofi_rdma_domain_rail_t;
@@ -1505,20 +1504,6 @@ public:
 	}
 
 	/**
-	 * Get pointer to the gin resources associated with this endpoint, or
-	 * nullptr if there are no associated GIN resources.
-	 */
-	inline nccl_ofi_gin_resources *get_gin_resources()
-	{
-		return gin_resources;
-	}
-
-	inline void set_gin_resources(nccl_ofi_gin_resources *gin_resources_arg)
-	{
-		this->gin_resources = gin_resources_arg;
-	}
-
-	/**
 	 * @brief Return endpoint rail with index `rail_id`
 	 */
 	inline nccl_net_ofi_rdma_ep_rail_t *rdma_endpoint_get_rail(uint16_t rail_id)
@@ -1534,6 +1519,14 @@ public:
 	{
 		assert(rail_id < num_control_rails);
 		return &control_rails[rail_id];
+	}
+
+	/**
+	 * @brief Return whether a control message should use FI_INJECT.
+	 */
+	inline bool use_inline_control_write(size_t ctrl_msg_len) const
+	{
+		return ctrl_msg_len <= max_control_write_inline_size;
 	}
 
 	/**
@@ -1749,6 +1742,9 @@ public:
 	nccl_net_ofi_scheduler *scheduler = nullptr;
 
 protected:
+	/* Maximum RMA inject size supported by the control endpoint. */
+	size_t max_control_write_inline_size = 0;
+
 	/**
 	 * @brief	Initialize rx buffer data of endpoint
 	 *
@@ -1796,17 +1792,12 @@ protected:
 	 */
 	void release_rdma_ep_resources(int dev_id);
 
-	static int ep_rail_init(int dev_id, uint16_t rail_id,
-				nccl_net_ofi_rdma_device_rail_t *dev_rail,
-				nccl_net_ofi_rdma_domain_rail_t *domain_rail,
-				nccl_net_ofi_rdma_ep_rail_t *ep_rail,
-				nccl_net_ofi_rdma_cq_rail_t *cq_rail,
-				uint32_t tclass);
-
-	/**
-	 * Associated GIN resources object
-	 */
-	nccl_ofi_gin_resources *gin_resources = nullptr;
+	int ep_rail_init(int dev_id, uint16_t rail_id,
+			 nccl_net_ofi_rdma_device_rail_t *dev_rail,
+			 nccl_net_ofi_rdma_domain_rail_t *domain_rail,
+			 nccl_net_ofi_rdma_ep_rail_t *ep_rail,
+			 nccl_net_ofi_rdma_cq_rail_t *cq_rail,
+			 bool is_control);
 };
 
 /*
