@@ -71,7 +71,10 @@ jobs:
             generate_packages: false
 
     runs-on: ubuntu-latest
-    container: ${{ matrix.container }}
+    # The CI images are rebuilt in place by update-containers.yaml, so they
+    # are referenced by tag rather than digest. The attestation therefore
+    # identifies the workflow and commit, not the exact build image.
+    container: ${{ matrix.container }} # zizmor: ignore[unpinned-images]
     name: Build for ${{ matrix.name }}
     env:
       PLUGIN_TAG: ${{ needs.metadata.outputs.tag }}
