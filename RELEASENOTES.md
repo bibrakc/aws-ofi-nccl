@@ -1,3 +1,13 @@
+# v99.28.0a4 (2026-10-05)
+
+This is a synthetic alpha release for validating the release tooling
+proposed for aws/aws-ofi-nccl on the bibrakc fork, with the existing-release
+check moved ahead of attestation. It is not intended for production use.
+
+* Validate the draft, the four canonical artifacts, and their attestations.
+* Validate that a rerun stops at the existing-release check without
+  creating new attestations.
+
 # v99.28.0a3 (2026-10-05)
 
 This is a synthetic alpha release for validating the five-commit release
