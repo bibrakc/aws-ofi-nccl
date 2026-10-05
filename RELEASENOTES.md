@@ -1,3 +1,15 @@
+# v99.28.0a3 (2026-10-05)
+
+This is a synthetic alpha release for validating the five-commit release
+tooling proposed for aws/aws-ofi-nccl#1385 on the bibrakc fork. It is not
+intended for production use.
+
+* Validate that the draft is created by `gh release create` with exactly the
+  four canonical artifacts and is marked as a prerelease.
+* Validate build provenance attestations for all four artifacts.
+* Validate that re-running the workflow refuses to touch the existing draft.
+* Validate the rendered release body and job summary.
+
 # v99.28.0a2 (2026-10-05)
 
 This is a synthetic alpha release for validating the reworked six-commit
