@@ -136,10 +136,12 @@ jobs:
       contents: write      # create the draft release and upload assets
     env:
       TAG: ${{ needs.metadata.outputs.tag }}
+      IS_ALPHA: ${{ needs.metadata.outputs.is_alpha }}
       TARBALL: ${{ needs.metadata.outputs.tarball }}
       DSC: ${{ needs.metadata.outputs.dsc }}
       DEBIAN_TAR: ${{ needs.metadata.outputs.debian_tar }}
       SRPM: ${{ needs.metadata.outputs.srpm }}
+      REPO: ${{ github.repository }}
     steps:
       - name: Checkout release notes
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -186,17 +188,29 @@ jobs:
           printf "\nChecksum (sha512) for the release tarball \`%s\`:\n\n\`\`\`\n%s\n\`\`\`\n" \
             "${TARBALL}" "${CHECKSUM}" >> RELEASE_NOTES.md
 
-      - name: Create Release
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
-        with:
-          name: AWS OFI NCCL ${{ needs.metadata.outputs.tag }}
-          draft: true
-          prerelease: ${{ needs.metadata.outputs.is_alpha == 'true' }}
-          body_path: RELEASE_NOTES.md
-          files: |
-            release-artifacts/${{ needs.metadata.outputs.tarball }}
-            release-artifacts/${{ needs.metadata.outputs.dsc }}
-            release-artifacts/${{ needs.metadata.outputs.debian_tar }}
-            release-artifacts/${{ needs.metadata.outputs.srpm }}
+      - name: Create draft release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Never modify an existing release for this tag (drafts included;
+          # GitHub allows several drafts per tag). A candidate is immutable:
+          # fix forward with the next alpha instead.
+          existing=$(gh api "repos/${REPO}/releases" --paginate \
+                       --jq '.[] | select(.tag_name == env.TAG) | .html_url')
+          if [ -n "${existing}" ]; then
+            echo "::error title=Release already exists::${TAG} already has a release: ${existing}"
+            exit 1
+          fi
+
+          args=(--repo "${REPO}" --verify-tag --draft
+                --title "AWS OFI NCCL ${TAG}" --notes-file RELEASE_NOTES.md)
+          if [ "${IS_ALPHA}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          url=$(gh release create "${TAG}" "${args[@]}" \
+                  "release-artifacts/${TARBALL}" \
+                  "release-artifacts/${DSC}" \
+                  "release-artifacts/${DEBIAN_TAR}" \
+                  "release-artifacts/${SRPM}")
+          echo "Created draft: ${url}"
