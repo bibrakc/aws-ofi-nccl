@@ -1,3 +1,8 @@
+# v99.29.0a2 (2026-10-06)
+
+This is a synthetic alpha release for rehearsing the Debian version fix on the
+bibrakc fork. It is not intended for production use.
+
 # v99.29.0a1 (2026-10-06)
 
 This is a synthetic alpha release for rehearsing the Debian version fix on the
