@@ -103,12 +103,23 @@ jobs:
       - name: Display structure of downloaded files
         run: ls -R
 
+      - name: Classify release tag
+        id: classify
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+a[0-9]+$ ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           name: AWS OFI NCCL ${{ github.ref_name }}
           draft: true
-          prerelease: false
+          prerelease: ${{ steps.classify.outputs.prerelease }}
           body_path: RELEASE_NOTES.md
           files: |
             aws-ofi-nccl*
